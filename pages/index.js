@@ -94,31 +94,107 @@ export default function AudiobookReader() {
           let author = '';
           const detectedChapters = [];
           
-          // Try to extract metadata from OPF file
+          // Try to extract metadata and navigation from OPF / NCX / nav.xhtml
           try {
-            const opfFiles = Object.keys(zip.files).filter(filename => 
-              filename.endsWith('.opf')
-            );
-            
+            const opfFiles = Object.keys(zip.files).filter((filename) => filename.toLowerCase().endsWith('.opf'));
+            let spineOrder = null;
+            let manifestMap = {};
             if (opfFiles.length > 0) {
-              const opfContent = await zip.files[opfFiles[0]].async('text');
+              const opfPath = opfFiles[0];
+              const opfContent = await zip.files[opfPath].async('text');
               const parser = new DOMParser();
               const xmlDoc = parser.parseFromString(opfContent, 'text/xml');
-              
-              // Extract title
+
+              // Extract title and author (dc:title / dc:creator)
               const titleElement = xmlDoc.querySelector('title, dc\\:title, [name="dc:title"]');
-              if (titleElement) {
-                title = titleElement.textContent.trim();
-              }
-              
-              // Extract author
+              if (titleElement) title = titleElement.textContent.trim();
               const authorElement = xmlDoc.querySelector('creator, dc\\:creator, [name="dc:creator"]');
-              if (authorElement) {
-                author = authorElement.textContent.trim();
+              if (authorElement) author = authorElement.textContent.trim();
+
+              // Build manifest map (id -> href)
+              const manifest = xmlDoc.querySelectorAll('manifest > item');
+              manifest.forEach((it) => {
+                const id = it.getAttribute('id');
+                const href = it.getAttribute('href');
+                if (id && href) manifestMap[id] = href;
+              });
+
+              // Build spine order (array of hrefs)
+              const spine = xmlDoc.querySelectorAll('spine > itemref');
+              if (spine.length > 0) {
+                spineOrder = Array.from(spine).map((ref) => {
+                  const idref = ref.getAttribute('idref');
+                  const href = manifestMap[idref] || idref;
+                  // resolve relative to opf folder
+                  const base = opfPath.includes('/') ? opfPath.substring(0, opfPath.lastIndexOf('/') + 1) : '';
+                  return base + href;
+                });
+              }
+
+              // Try to find a nav (nav.xhtml) or a toc (.ncx)
+              const allFiles = Object.keys(zip.files);
+              let navEntries = [];
+              const navFile = allFiles.find((f) => f.toLowerCase().endsWith('nav.xhtml') || f.toLowerCase().endsWith('nav.html'));
+              if (navFile) {
+                try {
+                  const navContent = await zip.files[navFile].async('text');
+                  const navDoc = parser.parseFromString(navContent, 'text/html');
+                  const nav = navDoc.querySelector('nav[epub\\:type="toc"], nav[role="doc-toc"]') || navDoc.querySelector('nav');
+                  if (nav) {
+                    const anchors = nav.querySelectorAll('a');
+                    anchors.forEach((a) => {
+                      const href = a.getAttribute('href');
+                      const text = (a.textContent || '').trim();
+                      if (href && text) navEntries.push({ href, title: text });
+                    });
+                  }
+                } catch (e) {
+                  // ignore nav parse errors
+                }
+              } else {
+                // try NCX
+                const ncxFile = allFiles.find((f) => f.toLowerCase().endsWith('.ncx'));
+                if (ncxFile) {
+                  try {
+                    const ncxContent = await zip.files[ncxFile].async('text');
+                    const ncxDoc = parser.parseFromString(ncxContent, 'text/xml');
+                    const navPoints = ncxDoc.querySelectorAll('navPoint');
+                    navPoints.forEach((np) => {
+                      const label = np.querySelector('navLabel > text');
+                      const contentElem = np.querySelector('content');
+                      const src = contentElem ? contentElem.getAttribute('src') : null;
+                      if (label && src) navEntries.push({ href: src, title: label.textContent.trim() });
+                    });
+                  } catch (e) {}
+                }
+              }
+
+              // If we got a spineOrder, prefer it to build the htmlFiles order
+              if (spineOrder && spineOrder.length > 0) {
+                const fileSet = new Set(Object.keys(zip.files));
+                const orderedHtmlFiles = [];
+                spineOrder.forEach((p) => {
+                  const candidates = [p, p.replace(/^[.\\/]+/, '')];
+                  for (const c of candidates) {
+                    if (fileSet.has(c)) {
+                      orderedHtmlFiles.push(c);
+                      break;
+                    }
+                  }
+                });
+                if (orderedHtmlFiles.length > 0) {
+                  // replace the htmlFiles list below by mutating the variable later
+                  var epubSpineOrdered = orderedHtmlFiles;
+                }
+              }
+
+              if (navEntries.length > 0) {
+                // normalize nav hrefs
+                var epubNav = navEntries.map((ne) => ({ href: ne.href.split('#')[0].replace(/^[.\\/]+/, ''), title: ne.title }));
               }
             }
           } catch (metaError) {
-            console.log('Could not extract metadata:', metaError);
+            console.log('Could not extract metadata or nav:', metaError);
           }
           
           // Find and read all HTML/XHTML files in the EPUB
@@ -131,58 +207,59 @@ export default function AudiobookReader() {
             .sort(); // Keep files in order
           
           // Extract text from each HTML file and detect chapters
-          for (let fileIndex = 0; fileIndex < htmlFiles.length; fileIndex++) {
-            const filename = htmlFiles[fileIndex];
+          // If we parsed an EPUB spine order earlier, prefer that order
+          const filesToProcess = (typeof epubSpineOrdered !== 'undefined' && epubSpineOrdered.length > 0) ? epubSpineOrdered : htmlFiles;
+          for (let fileIndex = 0; fileIndex < filesToProcess.length; fileIndex++) {
+            const filename = filesToProcess[fileIndex];
+            // skip files that may not be present
+            if (!zip.files[filename]) continue;
             const content = await zip.files[filename].async('text');
-            
+
             // Parse HTML to detect chapter structure
             const tempDiv = document.createElement('div');
             tempDiv.innerHTML = content;
-            
-            // Look for chapter markers in HTML structure
+
+            // First, try to find a matching nav entry for this file (if we parsed one)
             let chapterTitle = '';
-            
-            // Try to find chapter title from various HTML patterns
-            const h1 = tempDiv.querySelector('h1');
-            const h2 = tempDiv.querySelector('h2');
-            const titleElement = tempDiv.querySelector('[class*="chapter"], [class*="title"], [id*="chapter"]');
-            
-            // Be very strict about what we consider a chapter title
-            if (h1 && h1.textContent.trim().length > 0 && h1.textContent.trim().length < 100) {
-              chapterTitle = h1.textContent.trim().replace(/\s+/g, ' ');
-            } else if (h2 && h2.textContent.trim().length > 0 && h2.textContent.trim().length < 100) {
-              chapterTitle = h2.textContent.trim().replace(/\s+/g, ' ');
-            } else if (titleElement && titleElement.textContent.trim().length > 0 && titleElement.textContent.trim().length < 150) {
-              // For title elements, take only the first line or first 150 chars
-              const titleText = titleElement.textContent.trim().replace(/\s+/g, ' ').split('\n')[0];
-              if (titleText.length < 150) {
-                chapterTitle = titleText;
+            if (typeof epubNav !== 'undefined' && epubNav && epubNav.length > 0) {
+              const match = epubNav.find((ne) => {
+                const hrefName = ne.href.split('/').pop();
+                const fileName = filename.split('/').pop();
+                return hrefName === fileName || ne.href === filename;
+              });
+              if (match) chapterTitle = match.title;
+            }
+
+            // If nav didn't give a title, inspect headings inside the HTML
+            if (!chapterTitle) {
+              const h1 = tempDiv.querySelector('h1');
+              const h2 = tempDiv.querySelector('h2');
+              const titleElement = tempDiv.querySelector('[class*="chapter"], [class*="title"], [id*="chapter"]');
+              if (h1 && h1.textContent.trim().length > 0 && h1.textContent.trim().length < 200) {
+                chapterTitle = h1.textContent.trim().replace(/\s+/g, ' ');
+              } else if (h2 && h2.textContent.trim().length > 0 && h2.textContent.trim().length < 200) {
+                chapterTitle = h2.textContent.trim().replace(/\s+/g, ' ');
+              } else if (titleElement && titleElement.textContent.trim().length > 0 && titleElement.textContent.trim().length < 200) {
+                const titleText = titleElement.textContent.trim().replace(/\s+/g, ' ').split('\n')[0];
+                if (titleText.length < 200) chapterTitle = titleText;
               }
             }
-            
-            // Extract text content FIRST
+
+            // Extract cleaned text content
             const text = tempDiv.textContent || tempDiv.innerText || '';
-            
+
             // Only add chapter marker if we have actual text content in this file
             if (text.trim().length > 0) {
-              // If we found a chapter title, mark this as a chapter
               if (chapterTitle) {
-                detectedChapters.push({
-                  marker: `[[CHAPTER:${chapterTitle}]]`,
-                  title: chapterTitle
-                });
+                detectedChapters.push({ marker: `[[CHAPTER:${chapterTitle}]]`, title: chapterTitle });
                 extractedText += `[[CHAPTER:${chapterTitle}]]\n\n`;
-              } else if (htmlFiles.length > 1) {
-                // If multiple files but no title found, use generic chapter numbering
+              } else if (filesToProcess.length > 1) {
                 const chapterNum = detectedChapters.length + 1;
                 const genericTitle = `Chapter ${chapterNum}`;
-                detectedChapters.push({
-                  marker: `[[CHAPTER:${genericTitle}]]`,
-                  title: genericTitle
-                });
+                detectedChapters.push({ marker: `[[CHAPTER:${genericTitle}]]`, title: genericTitle });
                 extractedText += `[[CHAPTER:${genericTitle}]]\n\n`;
               }
-              
+
               extractedText += text + '\n\n';
             }
           }
