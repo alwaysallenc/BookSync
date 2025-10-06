@@ -1,11 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import { Play, Pause, SkipBack, SkipForward, Book, Settings, Volume2, Library, Plus, Upload, X, ArrowLeft, Trash2, List } from 'lucide-react';
 
-// Load JSZip from CDN for EPUB parsing
-const script = document.createElement('script');
-script.src = 'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';
-document.head.appendChild(script);
-
 export default function AudiobookReader() {
   const [currentPage, setCurrentPage] = useState('library'); // 'library', 'reader', 'upload'
   const [books, setBooks] = useState([
@@ -54,6 +49,15 @@ export default function AudiobookReader() {
   const audioRef = useRef(null);
   const audioFileInputRef = useRef(null);
   const textFileInputRef = useRef(null);
+
+  // Load JSZip from CDN for EPUB parsing
+  useEffect(() => {
+    if (typeof window !== 'undefined' && !window.JSZip) {
+      const script = document.createElement('script');
+      script.src = 'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';
+      document.head.appendChild(script);
+    }
+  }, []);
 
   // Open a book
   const openBook = (book) => {
