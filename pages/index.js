@@ -188,6 +188,10 @@ export default function AudiobookReader() {
           }
           
           // Clean up the extracted text thoroughly
+          // - remove HTML tags
+          // - replace HTML entities
+          // - preserve newlines so chapter markers (which are placed on their own lines)
+          //   remain detectable by the chapter parser
           extractedText = extractedText
             .replace(/<[^>]*>/g, '') // Remove any remaining HTML tags
             .replace(/&nbsp;/g, ' ') // Replace HTML spaces
@@ -196,8 +200,12 @@ export default function AudiobookReader() {
             .replace(/&gt;/g, '>') // Replace HTML greater than
             .replace(/&quot;/g, '"') // Replace HTML quotes
             .replace(/&#39;/g, "'") // Replace HTML apostrophes
-            .replace(/\s+/g, ' ') // Replace multiple spaces with single space
-            .replace(/\n\s*\n\s*\n+/g, '\n\n') // Clean up multiple newlines (max 2)
+            // normalize CRLF to LF
+            .replace(/\r\n/g, '\n')
+            // collapse consecutive spaces/tabs but keep newlines
+            .replace(/[ \t]+/g, ' ')
+            // collapse more than two newlines into two
+            .replace(/\n\s*\n\s*\n+/g, '\n\n')
             .trim();
           
           // If no metadata found, try to extract from filename
@@ -279,8 +287,9 @@ export default function AudiobookReader() {
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i].trim();
       
-      // Check for EPUB chapter markers first (inserted during EPUB parsing)
-      const epubChapterMatch = line.match(/^\[\[CHAPTER:(.+)\]\]$/);
+  // Check for EPUB chapter markers first (inserted during EPUB parsing)
+  // Accept markers with optional surrounding whitespace
+  const epubChapterMatch = line.match(/^\s*\[\[CHAPTER:(.+?)\]\]\s*$/i);
       
       if (epubChapterMatch) {
         // Save previous chapter's content
