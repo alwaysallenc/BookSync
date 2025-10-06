@@ -245,8 +245,44 @@ export default function AudiobookReader() {
               }
             }
 
-            // Extract cleaned text content
-            const text = tempDiv.textContent || tempDiv.innerText || '';
+            // Extract cleaned text content by grouping block elements into paragraphs
+            // Prefer explicit block-level elements so paragraphs are preserved
+            let paragraphs = [];
+            try {
+              const container = tempDiv.querySelector('body') || tempDiv;
+              // Attempt to use commonly used block elements
+              const blocks = container.querySelectorAll('p, div, section, article, li');
+              if (blocks && blocks.length > 0) {
+                blocks.forEach((el) => {
+                  // ignore elements that only contain other block children without text
+                  const t = (el.textContent || el.innerText || '').replace(/\s+/g, ' ').trim();
+                  if (t.length > 0) paragraphs.push(t);
+                });
+              } else {
+                // Fallback: split on newlines from the raw textContent
+                const raw = tempDiv.textContent || tempDiv.innerText || '';
+                paragraphs = raw.split(/\r?\n/).map(s => s.trim()).filter(s => s.length > 0);
+              }
+
+              // If no paragraph found, fallback to entire text as single paragraph
+              if (paragraphs.length === 0) {
+                const fallback = (tempDiv.textContent || tempDiv.innerText || '').replace(/\s+/g, ' ').trim();
+                if (fallback.length > 0) paragraphs = [fallback];
+              }
+            } catch (e) {
+              const fallback = (tempDiv.textContent || tempDiv.innerText || '').replace(/\s+/g, ' ').trim();
+              paragraphs = fallback ? [fallback] : [];
+            }
+
+            const text = paragraphs.join('\n\n');
+
+            // Also allow HTML meta tags (og:title, DC.Title) inside the file to override chapter title
+            if (!chapterTitle) {
+              const metaTitle = tempDiv.querySelector('meta[name="title"], meta[property="og:title"], meta[name="DC.Title"], meta[name="dc.title"]');
+              if (metaTitle && metaTitle.getAttribute('content')) {
+                chapterTitle = metaTitle.getAttribute('content').trim();
+              }
+            }
 
             // Only add chapter marker if we have actual text content in this file
             if (text.trim().length > 0) {
