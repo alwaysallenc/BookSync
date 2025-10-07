@@ -529,10 +529,29 @@ export default function AudiobookReader() {
 
   // Jump to chapter
   const jumpToChapter = (chapter) => {
-    const firstSentence = currentBook.content.find(s => s.id === chapter.startSentence);
-    if (firstSentence && audioRef.current) {
-      audioRef.current.currentTime = firstSentence.start;
+    if (!currentBook) return;
+    const firstSentence = currentBook.content.find((s) => s.id === chapter.startSentence);
+    if (firstSentence) {
+      // Seek audio if available
+      if (audioRef.current) {
+        try {
+          audioRef.current.currentTime = firstSentence.start;
+        } catch (e) {
+          // ignore seek errors
+        }
+      }
+
+      // Scroll sentence into view in reader
+      try {
+        const el = document.getElementById(`sentence-${firstSentence.id}`);
+        if (el && el.scrollIntoView) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      } catch (e) {}
+
+      // update UI state
       setShowChapters(false);
+      setCurrentTime(firstSentence.start || 0);
+      // ensure highlighted sentence updates
+      // (currentSentence is derived from currentTime in render)
     }
   };
 
@@ -591,9 +610,19 @@ export default function AudiobookReader() {
   };
 
   const jumpToSentence = (sentence) => {
+    if (!sentence) return;
+    // Seek audio if present
     if (audioRef.current) {
-      audioRef.current.currentTime = sentence.start;
+      try {
+        audioRef.current.currentTime = sentence.start;
+      } catch (e) {}
     }
+    // Scroll into view
+    try {
+      const el = document.getElementById(`sentence-${sentence.id}`);
+      if (el && el.scrollIntoView) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    } catch (e) {}
+    setCurrentTime(sentence.start || 0);
   };
 
   const formatTime = (seconds) => {
@@ -972,6 +1001,9 @@ export default function AudiobookReader() {
                   )}
                   <p
                     onClick={() => jumpToSentence(sentence)}
+                    id={`sentence-${sentence.id}`}
+                    tabIndex={0}
+                    aria-current={currentSentence?.id === sentence.id}
                     className={`cursor-pointer transition-all duration-300 rounded-lg px-3 py-2 ${
                       currentSentence?.id === sentence.id
                         ? 'bg-amber-200 text-amber-900 font-semibold scale-105 shadow-md'
